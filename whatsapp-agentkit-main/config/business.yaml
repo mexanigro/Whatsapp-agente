@@ -1,0 +1,23 @@
+# Configuración del negocio — Generado por AgentKit
+negocio:
+  nombre: "Arzac Studio"
+  descripcion: "Servicio de suscripción mensual que ofrece a negocios locales en Israel una solución digital completa: web profesional personalizada, CRM con turnos y reservas, chatbot IA 24/7, agente de WhatsApp, mantenimiento continuo, soporte, hosting y dominio. Todo por 790 ₪/mes."
+  horario: "Domingos a Jueves 7:30-19:00, Viernes 7:30-17:00, Sábado cerrado"
+  contacto:
+    email: "website@arzac.studio"
+    web: "arzac.studio"
+  precio: "790 ₪/mes"
+  moneda: "ILS (Shekels)"
+
+agente:
+  nombre: "Liam"
+  tono: "Profesional y amigable, nunca vendedor ni persuasivo"
+  casos_de_uso:
+    - "Responder preguntas frecuentes"
+    - "Agendar citas o reuniones de demostración"
+    - "Calificar y atender leads / ventas"
+    - "Soporte post-venta"
+
+metadata:
+  creado: "2026-05-14"
+  version: "1.0"
