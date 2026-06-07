@@ -180,13 +180,15 @@ async def listar_leads() -> list[dict]:
 PRECIOS_POR_MODELO = {
     "claude-sonnet-4-6": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
     "claude-haiku-4-5": {"input": 0.80, "output": 4.0, "cache_read": 0.08, "cache_write": 1.0},
+    "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.0, "cache_read": 0.08, "cache_write": 1.0},
 }
 
 
 async def registrar_costo(telefono: str, input_tokens: int, output_tokens: int,
                           cache_read: int = 0, cache_creation: int = 0,
-                          client_id: str = ""):
-    modelo = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
+                          client_id: str = "", modelo: str = ""):
+    if not modelo:
+        modelo = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
     precios = PRECIOS_POR_MODELO.get(modelo, PRECIOS_POR_MODELO["claude-sonnet-4-6"])
     costo = (
         (input_tokens * precios["input"] / 1_000_000) +

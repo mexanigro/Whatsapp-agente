@@ -1,6 +1,7 @@
 # agent/brain.py — Cerebro del agente: conexion con Claude API + tool use
 
 import os
+import re
 import json
 import yaml
 import logging
@@ -12,6 +13,7 @@ logger = logging.getLogger("agentkit")
 
 client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
+MODELO_HAIKU = "claude-haiku-4-5-20251001"
 
 # Cache del system prompt a nivel modulo (no releer YAML en cada request)
 _system_prompt_cache: str | None = None
@@ -154,6 +156,41 @@ def _tiene_intencion_tools(texto: str) -> bool:
     return any(p in texto_lower for p in _PALABRAS_TOOLS)
 
 
+# --- Clasificador de modelo Sonnet/Haiku ---
+
+_PALABRAS_BOOKING = {
+    "reservar", "agendar", "cancelar", "cancela", "cambiar turno", "mover turno",
+    "reagendar", "modificar turno", "anular",
+    "book", "cancel", "reschedule", "appointment",
+    "לקבוע", "ביטול", "לבטל",
+    "записаться", "отменить", "отмена", "перенести",
+}
+
+_INDICADORES_FLUJO_BOOKING = [
+    "turno", "reserv", "confirm", "disponib",
+    "horario disponible", "agendar", "appointment", "booking",
+]
+
+
+def clasificar_modelo(mensaje: str, historial: list[dict]) -> str:
+    """Decide si usar Haiku (barato) o Sonnet (calidad).
+    Sonnet: booking, cancelaciones, flujo de herramientas activo.
+    Haiku: todo lo demas."""
+    texto = mensaje.strip().lower()
+
+    if any(p in texto for p in _PALABRAS_BOOKING):
+        return CLAUDE_MODEL
+
+    if historial:
+        ultimos = historial[-3:]
+        for msg in ultimos:
+            contenido = msg.get("content", "").lower()
+            if any(kw in contenido for kw in _INDICADORES_FLUJO_BOOKING):
+                return CLAUDE_MODEL
+
+    return MODELO_HAIKU
+
+
 # Cache del estado del calendario (se invalida con recargar_config)
 _calendar_status: bool | None = None
 
@@ -207,6 +244,9 @@ async def generar_respuesta(mensaje: str, historial: list[dict],
     if not mensaje or len(mensaje.strip()) < 2:
         return obtener_mensaje_fallback()
 
+    # --- Routing inteligente Sonnet/Haiku ---
+    modelo_usar = clasificar_modelo(mensaje, historial)
+
     base_prompt = cargar_system_prompt()
 
     system_blocks = [
@@ -217,13 +257,49 @@ async def generar_respuesta(mensaje: str, historial: list[dict],
         }
     ]
 
+    # Inyectar config de turnos cacheada (evita tool call para preguntas de info)
+    from agent.appointments import obtener_config_cacheada
+    config_turnos = obtener_config_cacheada()
+    if config_turnos and "error" not in config_turnos:
+        servicios = config_turnos.get("services", [])
+        staff = config_turnos.get("staff", [])
+        if servicios:
+            lineas_servicios = "\n".join(
+                f"- {s.get('name', '')}: {s.get('price', '')} ({s.get('duration', '')} min)"
+                for s in servicios
+            )
+            lineas_staff = "\n".join(
+                f"- {s.get('name', '')}" for s in staff
+            ) if staff else "No configurado"
+            system_blocks.append({
+                "type": "text",
+                "text": (
+                    f"\n\n## Servicios y profesionales actuales\n{lineas_servicios}"
+                    f"\n\nProfesionales:\n{lineas_staff}"
+                )
+            })
+
     if lead_negocio:
         system_blocks.append({
             "type": "text",
             "text": f"\n\n## Contexto de esta conversacion\nEsta persona es del negocio: {lead_negocio}. Ya le construimos una web demo y se la mandamos. Sabes exactamente quien es y de que negocio se trata, no necesitas preguntarle. Usa el nombre del negocio de forma natural en la conversacion."
         })
 
-    # Cliente recurrente: si tiene historial previo o turnos previos, ajustamos el tono
+    if telefono:
+        from agent.pausa import es_admin
+        if es_admin(telefono):
+            system_blocks.append({
+                "type": "text",
+                "text": (
+                    "\n\n## Info interna — tiers de pricing (solo para el admin)\n"
+                    "Planes de Arzac Studio segun bookings mensuales:\n"
+                    "- Base 770 ₪/mes: hasta 100 bookings\n"
+                    "- Pro 960 ₪/mes: hasta 300 bookings\n"
+                    "- Enterprise 1,270 ₪/mes: ilimitado\n"
+                    "Esta info es interna del SaaS. NUNCA mencionarla a clientes finales."
+                )
+            })
+
     if telefono:
         try:
             from agent.analytics import es_cliente_recurrente
@@ -241,7 +317,6 @@ async def generar_respuesta(mensaje: str, historial: list[dict],
         except Exception as e:
             logger.debug(f"No se pudo evaluar recurrencia para {telefono}: {e}")
 
-    # Si el calendario esta desconectado, avisar al agente
     calendar_status = await _obtener_estado_calendario()
     if not calendar_status:
         system_blocks.append({
@@ -260,22 +335,27 @@ async def generar_respuesta(mensaje: str, historial: list[dict],
         "content": mensaje
     })
 
-    # Decidir si activar herramientas (solo si el calendario esta conectado)
-    usar_tools = _tiene_intencion_tools(mensaje) and calendar_status
+    # Tools solo con Sonnet y calendario conectado
+    usar_tools = (
+        _tiene_intencion_tools(mensaje)
+        and calendar_status
+        and modelo_usar == CLAUDE_MODEL
+    )
     max_iteraciones = 3
 
-    # Acumular tokens para registrar costo al final
     total_input = 0
     total_output = 0
     total_cache_read = 0
     total_cache_creation = 0
+
+    logger.info(f"Modelo seleccionado: {modelo_usar} | tools={usar_tools}")
 
     try:
         response = None
 
         for iteracion in range(max_iteraciones):
             kwargs = {
-                "model": CLAUDE_MODEL,
+                "model": modelo_usar,
                 "max_tokens": 1024,
                 "system": system_blocks,
                 "messages": mensajes,
@@ -285,14 +365,12 @@ async def generar_respuesta(mensaje: str, historial: list[dict],
 
             response = await client.messages.create(**kwargs)
 
-            # Acumular tokens
             usage = response.usage
             total_input += usage.input_tokens
             total_output += usage.output_tokens
             total_cache_read += getattr(usage, 'cache_read_input_tokens', 0) or 0
             total_cache_creation += getattr(usage, 'cache_creation_input_tokens', 0) or 0
 
-            # Si no hay tool_use, extraer texto y salir
             has_tool_use = any(
                 getattr(block, 'type', None) == "tool_use"
                 for block in response.content
@@ -301,8 +379,6 @@ async def generar_respuesta(mensaje: str, historial: list[dict],
             if response.stop_reason == "end_turn" or not has_tool_use:
                 break
 
-            # Hay tool_use: ejecutar herramientas y continuar
-            # Serializar respuesta del assistant
             assistant_content = []
             for block in response.content:
                 if block.type == "text":
@@ -317,7 +393,6 @@ async def generar_respuesta(mensaje: str, historial: list[dict],
 
             mensajes.append({"role": "assistant", "content": assistant_content})
 
-            # Ejecutar cada tool_use y agregar resultados
             tool_results = []
             for block in response.content:
                 if block.type == "tool_use":
@@ -334,7 +409,6 @@ async def generar_respuesta(mensaje: str, historial: list[dict],
 
             mensajes.append({"role": "user", "content": tool_results})
 
-        # Extraer texto final
         texto_final = ""
         if response:
             for block in response.content:
@@ -345,21 +419,20 @@ async def generar_respuesta(mensaje: str, historial: list[dict],
         if not texto_final:
             texto_final = obtener_mensaje_fallback()
 
-        # Log de tokens
         logger.info(
-            f"Tokens totales: {total_input} in / {total_output} out | "
+            f"Tokens totales ({modelo_usar}): {total_input} in / {total_output} out | "
             f"Cache: {total_cache_read} read / {total_cache_creation} creation"
         )
 
-        # Registrar costo acumulado
         if telefono:
             from agent.memory import registrar_costo
             costo = await registrar_costo(
                 telefono, total_input, total_output,
                 total_cache_read, total_cache_creation,
-                client_id=os.getenv("CLIENT_ID", "")
+                client_id=os.getenv("CLIENT_ID", ""),
+                modelo=modelo_usar
             )
-            logger.info(f"Costo request: ${costo:.6f}")
+            logger.info(f"Costo request ({modelo_usar}): ${costo:.6f}")
 
         return texto_final
 
