@@ -12,6 +12,8 @@ import os
 import logging
 from typing import Optional
 
+from agent.security import enmascarar_telefono
+
 logger = logging.getLogger("agentkit")
 
 # Mapeo de tipos de notificacion a ContentSid de templates Twilio.
@@ -57,18 +59,18 @@ async def notificar(telefono: str, tipo: str, mensaje_libre: str,
     if template_sid:
         ok = await proveedor.enviar_template(telefono, template_sid, variables)
         if ok:
-            logger.info(f"Notif {tipo} via template a {telefono}")
+            logger.info(f"Notif {tipo} via template a {enmascarar_telefono(telefono)}")
         else:
-            logger.warning(f"Template {tipo} fallo, intentando texto libre a {telefono}")
+            logger.warning(f"Template {tipo} fallo, intentando texto libre a {enmascarar_telefono(telefono)}")
             ok = await proveedor.enviar_mensaje(telefono, mensaje_libre)
         return ok
 
     # Sin template configurado: enviar texto libre
     ok = await proveedor.enviar_mensaje(telefono, mensaje_libre)
     if ok:
-        logger.info(f"Notif {tipo} via texto a {telefono}")
+        logger.info(f"Notif {tipo} via texto a {enmascarar_telefono(telefono)}")
     else:
-        logger.error(f"Error enviando notif {tipo} a {telefono}")
+        logger.error(f"Error enviando notif {tipo} a {enmascarar_telefono(telefono)}")
     return ok
 
 

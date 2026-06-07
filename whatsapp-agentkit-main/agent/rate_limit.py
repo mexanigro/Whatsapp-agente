@@ -10,6 +10,8 @@ import time
 import logging
 from collections import defaultdict
 
+from agent.security import enmascarar_telefono
+
 logger = logging.getLogger("agentkit")
 
 LIMITE_POR_MINUTO = 5
@@ -61,11 +63,11 @@ def _verificar_inmemory(telefono: str) -> bool:
     msgs_ultima_hora = len(timestamps)
 
     if msgs_ultimo_minuto >= LIMITE_POR_MINUTO:
-        logger.warning(f"Rate limit minuto excedido: {telefono} ({msgs_ultimo_minuto}/{LIMITE_POR_MINUTO})")
+        logger.warning(f"Rate limit minuto excedido: {enmascarar_telefono(telefono)} ({msgs_ultimo_minuto}/{LIMITE_POR_MINUTO})")
         return False
 
     if msgs_ultima_hora >= LIMITE_POR_HORA:
-        logger.warning(f"Rate limit hora excedido: {telefono} ({msgs_ultima_hora}/{LIMITE_POR_HORA})")
+        logger.warning(f"Rate limit hora excedido: {enmascarar_telefono(telefono)} ({msgs_ultima_hora}/{LIMITE_POR_HORA})")
         return False
 
     _registros[telefono].append(ahora)
@@ -88,11 +90,11 @@ def _verificar_redis(telefono: str) -> bool:
         _, _, count_min, count_hora = pipe.execute()
 
         if count_min >= LIMITE_POR_MINUTO:
-            logger.warning(f"Rate limit minuto excedido (Redis): {telefono} ({count_min}/{LIMITE_POR_MINUTO})")
+            logger.warning(f"Rate limit minuto excedido (Redis): {enmascarar_telefono(telefono)} ({count_min}/{LIMITE_POR_MINUTO})")
             return False
 
         if count_hora >= LIMITE_POR_HORA:
-            logger.warning(f"Rate limit hora excedido (Redis): {telefono} ({count_hora}/{LIMITE_POR_HORA})")
+            logger.warning(f"Rate limit hora excedido (Redis): {enmascarar_telefono(telefono)} ({count_hora}/{LIMITE_POR_HORA})")
             return False
 
         # Registrar nuevo timestamp

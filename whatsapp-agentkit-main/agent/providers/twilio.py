@@ -8,6 +8,7 @@ import httpx
 from fastapi import Request
 from twilio.request_validator import RequestValidator
 from agent.providers.base import ProveedorWhatsApp, MensajeEntrante
+from agent.security import enmascarar_telefono
 
 logger = logging.getLogger("agentkit")
 
@@ -76,7 +77,7 @@ class ProveedorTwilio(ProveedorWhatsApp):
         async with httpx.AsyncClient() as client:
             r = await client.post(url, data=data, headers=headers)
             if r.status_code != 201:
-                logger.error(f"Error Twilio: {r.status_code} — {r.text}")
+                logger.error(f"Error Twilio: {r.status_code} — {r.text[:200]}")
             return r.status_code == 201
 
     async def enviar_mensaje(self, telefono: str, mensaje: str) -> bool:
@@ -126,5 +127,5 @@ class ProveedorTwilio(ProveedorWhatsApp):
         async with httpx.AsyncClient() as client:
             r = await client.post(url, data=data, headers=headers)
             if r.status_code != 201:
-                logger.error(f"Error Twilio template: {r.status_code} — {r.text}")
+                logger.error(f"Error Twilio template: {r.status_code} — {r.text[:200]}")
             return r.status_code == 201

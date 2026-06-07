@@ -6,6 +6,7 @@ import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import PlainTextResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -21,6 +22,10 @@ from agent.rate_limit import verificar_rate_limit, inicializar_rate_limit
 from agent.humanize import partir_respuesta, calcular_delay
 from agent.horario import esta_en_horario, mensaje_fuera_horario, detectar_idioma_simple
 from agent.escalacion import detectar_urgencia, escalar
+from agent.security import (
+    verificar_secret, enmascarar_telefono, sanitizar_para_log,
+    sanitizar_mensaje_entrante, error_seguro,
+)
 from agent import analytics
 from agent import notifications
 from agent import seguimiento
@@ -30,7 +35,6 @@ load_dotenv()
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 COSTO_DIARIO_MAXIMO = float(os.getenv("COSTO_DIARIO_MAXIMO", "2.0"))
 CLIENT_ID = os.getenv("CLIENT_ID", "")
-AGENT_API_SECRET = os.getenv("AGENT_API_SECRET", "")
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT_RESPONSES", "20"))
 # Si "true", fuera de horario respondemos con mensaje fijo (ahorra tokens).
 # Si "false", la IA responde igual (puede hacer la salvedad en su mensaje).
@@ -49,14 +53,8 @@ PORT = int(os.getenv("PORT", 8000))
 # Semaforo para limitar respuestas concurrentes y evitar saturar el proceso
 _semaforo = asyncio.Semaphore(MAX_CONCURRENT)
 
-
-def _verificar_secret(request: Request):
-    """Valida el header x-agent-secret contra AGENT_API_SECRET."""
-    if not AGENT_API_SECRET:
-        raise HTTPException(status_code=500, detail="AGENT_API_SECRET no configurado")
-    secret = request.headers.get("x-agent-secret", "")
-    if secret != AGENT_API_SECRET:
-        raise HTTPException(status_code=401, detail="Secret invalido")
+# Alias para mantener compatibilidad interna
+_verificar_secret = verificar_secret
 
 
 @asynccontextmanager
@@ -77,8 +75,23 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="AgentKit — WhatsApp AI Agent",
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    docs_url="/docs" if ENVIRONMENT == "development" else None,
+    redoc_url="/redoc" if ENVIRONMENT == "development" else None,
+    openapi_url="/openapi.json" if ENVIRONMENT == "development" else None,
 )
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Cache-Control"] = "no-store"
+    if ENVIRONMENT != "development":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
 
 
 @app.get("/")
@@ -120,7 +133,7 @@ async def _enviar_humano(telefono: str, fragmentos: list[str], mensaje_id: str):
     for i, fragmento in enumerate(fragmentos):
         delay = calcular_delay(fragmento)
         logger.info(
-            f"Fragmento {i+1}/{len(fragmentos)} a {telefono} en {delay:.1f}s "
+            f"Fragmento {i+1}/{len(fragmentos)} a {enmascarar_telefono(telefono)} en {delay:.1f}s "
             f"({len(fragmento)} chars)"
         )
         # Typing indicator antes de cada fragmento (se renueva, dura hasta 25s o hasta enviar)
@@ -138,7 +151,7 @@ async def _enviar_humano(telefono: str, fragmentos: list[str], mensaje_id: str):
 async def procesar_mensaje(telefono: str, texto: str, mensaje_id: str):
     """Procesa un mensaje con backpressure via semaforo."""
     if _semaforo._value == 0:
-        logger.warning(f"Semaforo lleno ({MAX_CONCURRENT}), esperando para {telefono}")
+        logger.warning(f"Semaforo lleno ({MAX_CONCURRENT}), esperando para {enmascarar_telefono(telefono)}")
     async with _semaforo:
         try:
             historial = await obtener_historial(telefono)
@@ -151,13 +164,13 @@ async def procesar_mensaje(telefono: str, texto: str, mensaje_id: str):
 
             fragmentos = partir_respuesta(respuesta)
             if not fragmentos:
-                logger.warning(f"Respuesta vacia para {telefono}, no se envia nada")
+                logger.warning(f"Respuesta vacia para {enmascarar_telefono(telefono)}, no se envia nada")
                 return
 
             await _enviar_humano(telefono, fragmentos, mensaje_id)
             logger.info(
-                f"Respuesta a {telefono} en {len(fragmentos)} fragmento(s): "
-                f"{respuesta[:120]}..."
+                f"Respuesta a {enmascarar_telefono(telefono)} en {len(fragmentos)} fragmento(s) "
+                f"({len(respuesta)} chars)"
             )
 
             # Analytics: registrar mensaje saliente
@@ -174,7 +187,7 @@ async def procesar_mensaje(telefono: str, texto: str, mensaje_id: str):
                 )
 
         except Exception as e:
-            logger.error(f"Error procesando mensaje de {telefono}: {e}")
+            logger.error(f"Error procesando mensaje de {enmascarar_telefono(telefono)}: {e}")
 
 
 @app.post("/webhook")
@@ -186,7 +199,12 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
             if msg.es_propio or not msg.texto:
                 continue
 
-            logger.info(f"Mensaje de {msg.telefono}: {msg.texto}")
+            logger.info(f"Mensaje de {enmascarar_telefono(msg.telefono)} ({len(msg.texto)} chars)")
+
+            # Sanitizar mensaje entrante (longitud, caracteres de control)
+            msg.texto = sanitizar_mensaje_entrante(msg.texto)
+            if not msg.texto:
+                continue
 
             # Deduplicacion: si ya procesamos este mensaje, ignorar
             if await ya_procesado(msg.mensaje_id):
@@ -207,7 +225,7 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
                 respuesta_cmd = await ejecutar_comando(msg.texto)
                 if respuesta_cmd:
                     await proveedor.enviar_mensaje(msg.telefono, respuesta_cmd)
-                    logger.info(f"Comando admin ejecutado: {msg.texto}")
+                    logger.info(f"Comando admin ejecutado: {sanitizar_para_log(msg.texto, 40)}")
                 continue
 
             # Si el cliente respondio, cancelar follow-ups pendientes para este telefono
@@ -237,7 +255,7 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
 
             # Si la IA esta pausada, no contestar
             if await esta_pausado():
-                logger.info(f"IA pausada, ignorando mensaje de {msg.telefono}")
+                logger.info(f"IA pausada, ignorando mensaje de {enmascarar_telefono(msg.telefono)}")
                 await analytics.registrar_evento(
                     analytics.EVENTO_PAUSA_ACTIVA, msg.telefono, {}, client_id=CLIENT_ID
                 )
@@ -245,7 +263,7 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
 
             # Rate limiting
             if not verificar_rate_limit(msg.telefono):
-                logger.warning(f"Rate limit excedido para {msg.telefono}")
+                logger.warning(f"Rate limit excedido para {enmascarar_telefono(msg.telefono)}")
                 await analytics.registrar_evento(
                     analytics.EVENTO_RATE_LIMIT_BLOQUEO, msg.telefono, {},
                     client_id=CLIENT_ID
@@ -282,7 +300,7 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
 
     except Exception as e:
         logger.error(f"Error en webhook: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=error_seguro(e))
 
 
 async def _maybe_programar_followup(telefono: str):
@@ -297,9 +315,9 @@ async def _maybe_programar_followup(telefono: str):
         await seguimiento.programar_followup_lead(
             telefono, {"negocio": negocio}, horas=FOLLOWUP_LEAD_HORAS
         )
-        logger.info(f"Follow-up programado para {telefono} en {FOLLOWUP_LEAD_HORAS}h")
+        logger.info(f"Follow-up programado para {enmascarar_telefono(telefono)} en {FOLLOWUP_LEAD_HORAS}h")
     except Exception as e:
-        logger.warning(f"No se pudo programar follow-up para {telefono}: {e}")
+        logger.warning(f"No se pudo programar follow-up para {enmascarar_telefono(telefono)}: {e}")
 
 
 # --- Modelos para endpoints internos ---
@@ -384,7 +402,7 @@ async def notificar_turno(payload: NotificacionTurno, request: Request):
         if ok:
             enviados_admin += 1
         else:
-            logger.error(f"Error enviando notificacion admin a {telefono}")
+            logger.error(f"Error enviando notificacion admin a {enmascarar_telefono(telefono)}")
     resultados["admin"] = enviados_admin
 
     # Staff (nuevo)

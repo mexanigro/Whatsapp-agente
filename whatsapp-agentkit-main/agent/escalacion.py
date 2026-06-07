@@ -10,6 +10,8 @@ import re
 from datetime import datetime, timedelta
 from typing import Optional
 
+from agent.security import enmascarar_telefono
+
 logger = logging.getLogger("agentkit")
 
 # Palabras clave por idioma (lowercase). Multi-idioma porque el negocio atiende
@@ -111,7 +113,7 @@ async def escalar(telefono: str, texto_original: str, razones: list[str],
         return None
 
     if await ya_escalado_recientemente(telefono):
-        logger.info(f"Telefono {telefono} ya escalado recientemente, saltando notificacion")
+        logger.info(f"Telefono {enmascarar_telefono(telefono)} ya escalado recientemente, saltando notificacion")
         return None
 
     from agent.providers import obtener_proveedor
@@ -138,7 +140,7 @@ async def escalar(telefono: str, texto_original: str, razones: list[str],
         hasta = datetime.utcnow() + timedelta(minutes=pausar_minutos)
         await _guardar_pausa(hasta)
         await marcar_escalado(telefono)
-        logger.warning(f"Escalacion exitosa: {telefono} -> admin. IA pausada {pausar_minutos}min")
+        logger.warning(f"Escalacion exitosa: {enmascarar_telefono(telefono)} -> admin. IA pausada {pausar_minutos}min")
         return mensaje
     else:
         logger.error(f"Error escalando a admin: provider no pudo enviar mensaje")

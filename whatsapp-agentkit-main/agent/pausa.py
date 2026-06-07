@@ -6,6 +6,8 @@ import logging
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
+from agent.security import enmascarar_telefono
+
 load_dotenv()
 logger = logging.getLogger("agentkit")
 
@@ -126,7 +128,7 @@ async def ejecutar_comando(texto: str) -> str | None:
         telefono = re.sub(r"[\s-]", "", match.group(1))
         negocio = match.group(2).strip()
         await guardar_lead(telefono, negocio)
-        logger.info(f"Lead registrado: {telefono} -> {negocio}")
+        logger.info(f"Lead registrado: {enmascarar_telefono(telefono)} -> {negocio}")
         return f"Lead registrado: {negocio} ({telefono})"
 
     if texto_lower == "#leads":
