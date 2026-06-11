@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 load_dotenv()
 logger = logging.getLogger("agentkit")
 
-client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), timeout=30.0, max_retries=2)
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 MODELO_HAIKU = "claude-haiku-4-5-20251001"
 
@@ -241,7 +241,10 @@ async def _ejecutar_herramienta(nombre: str, argumentos: dict, telefono: str) ->
 async def generar_respuesta(mensaje: str, historial: list[dict],
                             lead_negocio: str | None = None,
                             telefono: str | None = None) -> str:
-    if not mensaje or len(mensaje.strip()) < 2:
+    # Solo fallback si viene realmente vacio. Un "ok", "k" o un emoji solo
+    # son mensajes validos: responder "no te entendi" a un pulgar arriba
+    # delata al bot. El LLM sabe reaccionar natural a eso.
+    if not mensaje or not mensaje.strip():
         return obtener_mensaje_fallback()
 
     # --- Routing inteligente Sonnet/Haiku ---

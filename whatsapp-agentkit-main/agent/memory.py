@@ -1,15 +1,24 @@
 # agent/memory.py — Memoria de conversaciones con SQLite
+#
+# TODO SEGURIDAD: los datos de conversacion (mensajes, leads, telefonos) se almacenan
+# en texto plano en SQLite. En produccion (Railway) el disco es efimero y no persiste
+# entre deploys. Para despliegues con disco persistente, evaluar encripcion at-rest
+# (SQLCipher o encripcion a nivel filesystem).
 
 import os
 import aiosqlite
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time, timezone
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 load_dotenv()
 logger = logging.getLogger("agentkit")
 
 DB_PATH = os.getenv("DB_PATH", "agentkit.db")
+
+# TZ del negocio para el corte del cap diario de costos (misma que horario.py)
+BUSINESS_TIMEZONE = ZoneInfo(os.getenv("BUSINESS_TIMEZONE", "Asia/Jerusalem"))
 
 
 async def inicializar_db():
@@ -91,7 +100,7 @@ async def guardar_mensaje(telefono: str, role: str, content: str):
         await db.commit()
 
 
-async def obtener_historial(telefono: str, limite: int = 10) -> list[dict]:
+async def obtener_historial(telefono: str, limite: int = 24) -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             "SELECT role, content FROM mensajes WHERE telefono = ? ORDER BY timestamp DESC LIMIT ?",
@@ -131,15 +140,19 @@ async def ya_procesado(mensaje_id: str) -> bool:
         return await cursor.fetchone() is not None
 
 
-async def registrar_procesado(mensaje_id: str, telefono: str):
+async def registrar_procesado(mensaje_id: str, telefono: str) -> bool:
+    """Registra el mensaje como procesado de forma atomica (gate anti-duplicados).
+    Retorna True solo si es el primer procesamiento (INSERT efectivo);
+    False si ya estaba registrado (duplicado concurrente o reintento)."""
     if not mensaje_id:
-        return
+        return True
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
+        cursor = await db.execute(
             "INSERT OR IGNORE INTO mensajes_procesados (mensaje_id, telefono, timestamp) VALUES (?, ?, ?)",
             (mensaje_id, telefono, datetime.utcnow().isoformat())
         )
         await db.commit()
+        return cursor.rowcount == 1
 
 
 # --- Leads ---
@@ -209,7 +222,12 @@ async def registrar_costo(telefono: str, input_tokens: int, output_tokens: int,
 
 
 async def obtener_costo_diario(client_id: str = "") -> float:
-    hoy = datetime.utcnow().date().isoformat()
+    # Inicio del dia en la TZ del negocio, convertido a UTC naive
+    # (los timestamps se guardan con datetime.utcnow().isoformat()).
+    # Asi el cap diario se resetea a medianoche local, no a medianoche UTC.
+    hoy_local = datetime.now(BUSINESS_TIMEZONE).date()
+    inicio_local = datetime.combine(hoy_local, time.min, tzinfo=BUSINESS_TIMEZONE)
+    hoy = inicio_local.astimezone(timezone.utc).replace(tzinfo=None).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
         if client_id:
             cursor = await db.execute(

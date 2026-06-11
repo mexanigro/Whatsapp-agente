@@ -10,21 +10,21 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
-from agent.brain import generar_respuesta
+from agent.brain import generar_respuesta, obtener_mensaje_error
 from agent.memory import (
     inicializar_db, guardar_mensaje, obtener_historial, obtener_lead,
-    ya_procesado, registrar_procesado, obtener_costo_diario,
+    registrar_procesado, obtener_costo_diario,
     limpiar_registros_antiguos, guardar_config, guardar_lead
 )
 from agent.providers import obtener_proveedor
 from agent.pausa import es_admin, parsear_comando, ejecutar_comando, esta_pausado
-from agent.rate_limit import verificar_rate_limit, inicializar_rate_limit
+from agent.rate_limit import verificar_rate_limit, verificar_rate_limit_global, inicializar_rate_limit
 from agent.humanize import partir_respuesta, calcular_delay
 from agent.horario import esta_en_horario, mensaje_fuera_horario, detectar_idioma_simple
 from agent.escalacion import detectar_urgencia, escalar
 from agent.security import (
     verificar_secret, enmascarar_telefono, sanitizar_para_log,
-    sanitizar_mensaje_entrante, error_seguro,
+    sanitizar_mensaje_entrante, verificar_timestamp_webhook, error_seguro,
 )
 from agent import analytics
 from agent import notifications
@@ -32,7 +32,7 @@ from agent import seguimiento
 
 load_dotenv()
 
-ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
 COSTO_DIARIO_MAXIMO = float(os.getenv("COSTO_DIARIO_MAXIMO", "2.0"))
 CLIENT_ID = os.getenv("CLIENT_ID", "")
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT_RESPONSES", "20"))
@@ -53,8 +53,61 @@ PORT = int(os.getenv("PORT", 8000))
 # Semaforo para limitar respuestas concurrentes y evitar saturar el proceso
 _semaforo = asyncio.Semaphore(MAX_CONCURRENT)
 
+# Locks por telefono para serializar mensajes concurrentes del mismo usuario
+# (evita races en el historial: leer -> generar -> guardar)
+_locks_usuario: dict[str, asyncio.Lock] = {}
+
+
+def _obtener_lock_usuario(telefono: str) -> asyncio.Lock:
+    # Eviction simple para que el dict no crezca sin limite
+    if len(_locks_usuario) > 1000:
+        for key in [k for k, lk in _locks_usuario.items() if not lk.locked()]:
+            del _locks_usuario[key]
+    if telefono not in _locks_usuario:
+        _locks_usuario[telefono] = asyncio.Lock()
+    return _locks_usuario[telefono]
+
 # Alias para mantener compatibilidad interna
 _verificar_secret = verificar_secret
+
+# --- Debounce de mensajes consecutivos ---
+# Una persona suele mandar 2-3 mensajes cortos seguidos ("hola" / "una consulta" /
+# "cuanto sale?"). En vez de responder cada uno por separado, esperamos unos
+# segundos desde el ultimo mensaje y respondemos al hilo completo de una vez.
+DEBOUNCE_SEGUNDOS = float(os.getenv("DEBOUNCE_MENSAJES_SEGUNDOS", "8"))
+
+# telefono -> {"textos": [str], "mensaje_id": str, "task": asyncio.Task}
+_buffers_debounce: dict[str, dict] = {}
+
+
+def encolar_con_debounce(telefono: str, texto: str, mensaje_id: str):
+    """Acumula mensajes del mismo telefono y dispara el procesamiento
+    cuando pasan DEBOUNCE_SEGUNDOS sin mensajes nuevos."""
+    buf = _buffers_debounce.get(telefono)
+    if buf:
+        buf["textos"].append(texto)
+        buf["mensaje_id"] = mensaje_id
+        buf["task"].cancel()
+        logger.info(
+            f"Debounce: mensaje acumulado para {enmascarar_telefono(telefono)} "
+            f"({len(buf['textos'])} en buffer)"
+        )
+    else:
+        buf = {"textos": [texto], "mensaje_id": mensaje_id}
+        _buffers_debounce[telefono] = buf
+    buf["task"] = asyncio.create_task(_disparar_debounce(telefono))
+
+
+async def _disparar_debounce(telefono: str):
+    try:
+        await asyncio.sleep(DEBOUNCE_SEGUNDOS)
+    except asyncio.CancelledError:
+        return
+    buf = _buffers_debounce.pop(telefono, None)
+    if not buf:
+        return
+    texto = "\n".join(buf["textos"])
+    await procesar_mensaje(telefono, texto, buf["mensaje_id"])
 
 
 @asynccontextmanager
@@ -131,7 +184,7 @@ async def _enviar_humano(telefono: str, fragmentos: list[str], mensaje_id: str):
     """Envia los fragmentos como mensajes separados con typing indicator y delays variables.
     Reproduce el ritmo de una persona escribiendo por WhatsApp."""
     for i, fragmento in enumerate(fragmentos):
-        delay = calcular_delay(fragmento)
+        delay = calcular_delay(fragmento, es_primer_fragmento=(i == 0))
         logger.info(
             f"Fragmento {i+1}/{len(fragmentos)} a {enmascarar_telefono(telefono)} en {delay:.1f}s "
             f"({len(fragmento)} chars)"
@@ -152,14 +205,18 @@ async def procesar_mensaje(telefono: str, texto: str, mensaje_id: str):
     """Procesa un mensaje con backpressure via semaforo."""
     if _semaforo._value == 0:
         logger.warning(f"Semaforo lleno ({MAX_CONCURRENT}), esperando para {enmascarar_telefono(telefono)}")
-    async with _semaforo:
+    async with _semaforo, _obtener_lock_usuario(telefono):
         try:
             historial = await obtener_historial(telefono)
             lead_negocio = await obtener_lead(telefono)
 
+            # Guardar el mensaje del usuario ANTES de generar: si la generacion
+            # falla o llega otro mensaje, el historial ya lo refleja.
+            # (historial se leyo antes, asi que no se duplica en el prompt)
+            await guardar_mensaje(telefono, "user", texto)
+
             respuesta = await generar_respuesta(texto, historial, lead_negocio, telefono)
 
-            await guardar_mensaje(telefono, "user", texto)
             await guardar_mensaje(telefono, "assistant", respuesta)
 
             fragmentos = partir_respuesta(respuesta)
@@ -188,11 +245,25 @@ async def procesar_mensaje(telefono: str, texto: str, mensaje_id: str):
 
         except Exception as e:
             logger.error(f"Error procesando mensaje de {enmascarar_telefono(telefono)}: {e}")
+            # Avisar al usuario con mensaje generico para que no quede sin respuesta
+            try:
+                await proveedor.enviar_mensaje(telefono, obtener_mensaje_error())
+            except Exception as e2:
+                logger.error(f"No se pudo enviar mensaje de error a {enmascarar_telefono(telefono)}: {e2}")
 
 
 @app.post("/webhook")
 async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
     try:
+        # Rate limiting global (anti-abuse desde multiples numeros)
+        if not verificar_rate_limit_global():
+            raise HTTPException(status_code=429, detail="Too many requests")
+
+        # Anti-replay: rechazar webhooks con timestamp viejo (>5 min)
+        if not verificar_timestamp_webhook(request.headers.get("X-Twilio-Timestamp")):
+            logger.warning("Webhook rechazado por timestamp viejo (posible replay)")
+            return {"status": "rejected", "reason": "stale_timestamp"}
+
         mensajes = await proveedor.parsear_webhook(request)
 
         for msg in mensajes:
@@ -206,13 +277,11 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
             if not msg.texto:
                 continue
 
-            # Deduplicacion: si ya procesamos este mensaje, ignorar
-            if await ya_procesado(msg.mensaje_id):
+            # Deduplicacion atomica: el INSERT OR IGNORE es el gate
+            # (evita race TOCTOU entre chequear y registrar)
+            if not await registrar_procesado(msg.mensaje_id, msg.telefono):
                 logger.info(f"Mensaje duplicado ignorado: {msg.mensaje_id}")
                 continue
-
-            # Registrar como procesado inmediatamente para evitar duplicados concurrentes
-            await registrar_procesado(msg.mensaje_id, msg.telefono)
 
             # Analytics: registrar mensaje entrante (silencioso ante errores)
             await analytics.registrar_evento(
@@ -246,10 +315,18 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
                     background_tasks.add_task(
                         escalar, msg.telefono, msg.texto, razones, 30
                     )
-                    # Aviso liviano al cliente y NO respondemos con IA
+                    # Aviso liviano al cliente (en su idioma) y NO respondemos con IA
+                    avisos_escalacion = {
+                        "es": "Recibido, te paso con una persona del equipo ahora",
+                        "en": "Got it, let me get someone from the team for you now",
+                        "he": "קיבלתי, אני מעביר אותך למישהו מהצוות עכשיו",
+                        "ru": "Принято, сейчас передам вас человеку из команды",
+                        "ar": "وصلني، رح وصلك مع حدا من الفريق هلق",
+                    }
+                    idioma_esc = detectar_idioma_simple(msg.texto)
                     await proveedor.enviar_mensaje(
                         msg.telefono,
-                        "Recibido, te paso con una persona del equipo ahora."
+                        avisos_escalacion.get(idioma_esc, avisos_escalacion["es"])
                     )
                     continue
 
@@ -293,8 +370,10 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
                 )
                 continue
 
-            # Procesar en background para responder 200 rapido a Twilio
-            background_tasks.add_task(procesar_mensaje, msg.telefono, msg.texto, msg.mensaje_id)
+            # Encolar con debounce: si llegan varios mensajes seguidos del mismo
+            # telefono, se responde una sola vez al hilo completo (mas humano).
+            # El webhook responde 200 rapido igual porque el task corre aparte.
+            encolar_con_debounce(msg.telefono, msg.texto, msg.mensaje_id)
 
         return {"status": "ok"}
 

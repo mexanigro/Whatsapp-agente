@@ -199,17 +199,24 @@ def mensaje_fuera_horario(idioma: str = "es") -> str:
             horario_str_es = f" Te respondo cuando arranque mas tarde (en aprox {horas}h)."
             horario_str_en = f" I'll get back to you when I'm back (in about {horas}h)."
             horario_str_he = f" אחזור אליך מאוחר יותר (בערך {horas}ש)."
+            horario_str_ru = f" Отвечу, когда вернусь (примерно через {horas}ч)."
+            horario_str_ar = f" برد عليك لما ارجع (بعد حوالي {horas} ساعات)."
         else:
             horario_str_es = " Te respondo cuando vuelva a estar disponible."
             horario_str_en = " I'll get back to you when I'm available again."
             horario_str_he = " אחזור אליך כשאהיה זמין שוב."
+            horario_str_ru = " Отвечу, как только снова буду на связи."
+            horario_str_ar = " برد عليك اول ما ارجع متاح."
     else:
         horario_str_es = horario_str_en = horario_str_he = ""
+        horario_str_ru = horario_str_ar = ""
 
     msgs = {
         "es": f"Hola, gracias por escribir. Ahora estoy fuera de horario.{horario_str_es if proximo else ''}",
         "en": f"Hi, thanks for writing. I'm currently outside business hours.{horario_str_en if proximo else ''}",
         "he": f"היי, תודה על הפנייה. כרגע אני מחוץ לשעות פעילות.{horario_str_he if proximo else ''}",
+        "ru": f"Здравствуйте, спасибо за сообщение. Сейчас я вне рабочих часов.{horario_str_ru if proximo else ''}",
+        "ar": f"اهلا، شكرا على رسالتك. هلق انا خارج ساعات الدوام.{horario_str_ar if proximo else ''}",
     }
     return msgs.get(idioma, msgs["es"])
 
