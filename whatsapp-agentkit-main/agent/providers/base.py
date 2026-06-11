@@ -12,6 +12,16 @@ class MensajeEntrante:
     texto: str
     mensaje_id: str
     es_propio: bool
+    # Media entrante (nota de voz, imagen, etc.) — None si es solo texto
+    media_url: str | None = None
+    media_content_type: str | None = None
+
+    @property
+    def es_audio(self) -> bool:
+        return bool(
+            self.media_url
+            and (self.media_content_type or "").startswith("audio")
+        )
 
 
 class ProveedorWhatsApp(ABC):
@@ -31,6 +41,10 @@ class ProveedorWhatsApp(ABC):
 
     async def enviar_typing_indicator(self, mensaje_id: str) -> bool:
         """Envia indicador 'escribiendo...' al usuario. Override en cada provider."""
+        return False
+
+    async def enviar_audio(self, telefono: str, url_audio: str) -> bool:
+        """Envia un audio (nota de voz) desde una URL publica. Override en cada provider."""
         return False
 
     async def validar_webhook(self, request: Request) -> dict | int | None:

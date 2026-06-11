@@ -238,9 +238,24 @@ async def _ejecutar_herramienta(nombre: str, argumentos: dict, telefono: str) ->
     return json.dumps(resultado, ensure_ascii=False)
 
 
+# Bloque extra de system prompt cuando la respuesta sera convertida a audio.
+# Tecnicas de VOICE-HUMANIZATION.md: hablado, corto, numeros en palabras.
+BLOQUE_CANAL_VOZ = """
+
+## Canal de esta respuesta: NOTA DE VOZ (critico)
+El cliente mando un audio y tu respuesta va a ser convertida a voz y enviada como nota de voz. Reglas que REEMPLAZAN al formato WhatsApp:
+- UN solo bloque de texto hablado. NUNCA uses el separador ||| ni dividas en mensajes.
+- Escribi como se habla, no como se escribe: frases cortas, contracciones, arranque natural ("Hola, mira", "Bueno, te cuento", "Dale, si").
+- Numeros, horas y precios en palabras: "setecientos noventa shekels", "a las diez y media", nunca "790" ni "10:30".
+- Nada de emojis, listas, markdown ni URLs. Si tenes que pasar un link o dato exacto, decilo en el audio ("te lo paso por escrito ahora") y corta ahi.
+- Largo maximo: lo que se dice en quince o veinte segundos (2 a 4 frases). Nadie manda audios largos para confirmar un turno.
+- Esta permitido (y suma) alguna muletilla natural del idioma: "eh", "mira", "viste" en espanol; equivalentes en hebreo/ingles/ruso/arabe. Maximo una por audio."""
+
+
 async def generar_respuesta(mensaje: str, historial: list[dict],
                             lead_negocio: str | None = None,
-                            telefono: str | None = None) -> str:
+                            telefono: str | None = None,
+                            canal: str = "texto") -> str:
     # Solo fallback si viene realmente vacio. Un "ok", "k" o un emoji solo
     # son mensajes validos: responder "no te entendi" a un pulgar arriba
     # delata al bot. El LLM sabe reaccionar natural a eso.
@@ -319,6 +334,9 @@ async def generar_respuesta(mensaje: str, historial: list[dict],
                 system_blocks.append({"type": "text", "text": bloque})
         except Exception as e:
             logger.debug(f"No se pudo evaluar recurrencia para {telefono}: {e}")
+
+    if canal == "voz":
+        system_blocks.append({"type": "text", "text": BLOQUE_CANAL_VOZ})
 
     calendar_status = await _obtener_estado_calendario()
     if not calendar_status:

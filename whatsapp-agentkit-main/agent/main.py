@@ -4,8 +4,8 @@ import os
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
-from fastapi.responses import PlainTextResponse
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, WebSocket
+from fastapi.responses import PlainTextResponse, FileResponse, Response
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -19,7 +19,7 @@ from agent.memory import (
 from agent.providers import obtener_proveedor
 from agent.pausa import es_admin, parsear_comando, ejecutar_comando, esta_pausado
 from agent.rate_limit import verificar_rate_limit, verificar_rate_limit_global, inicializar_rate_limit
-from agent.humanize import partir_respuesta, calcular_delay
+from agent.humanize import partir_respuesta, calcular_delay, calcular_delay_audio
 from agent.horario import esta_en_horario, mensaje_fuera_horario, detectar_idioma_simple
 from agent.escalacion import detectar_urgencia, escalar
 from agent.security import (
@@ -29,6 +29,9 @@ from agent.security import (
 from agent import analytics
 from agent import notifications
 from agent import seguimiento
+from agent.voice import transcribe as voice_transcribe
+from agent.voice import tts as voice_tts
+from agent.voice import media as voice_media
 
 load_dotenv()
 
@@ -41,6 +44,8 @@ MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT_RESPONSES", "20"))
 AUTO_REPLY_FUERA_HORARIO = os.getenv("AUTO_REPLY_FUERA_HORARIO", "true").lower() == "true"
 # Activar deteccion de urgencia + escalacion automatica
 ESCALACION_ACTIVA = os.getenv("ESCALACION_ACTIVA", "true").lower() == "true"
+# Llamadas de voz por WhatsApp (requiere onboarding de ConversationRelay en Twilio)
+LLAMADAS_ACTIVAS = os.getenv("LLAMADAS_ACTIVAS", "true").lower() == "true"
 # Horas despues del primer mensaje sin respuesta para programar un follow-up
 FOLLOWUP_LEAD_HORAS = int(os.getenv("FOLLOWUP_LEAD_HORAS", "24"))
 log_level = logging.DEBUG if ENVIRONMENT == "development" else logging.INFO
@@ -76,24 +81,27 @@ _verificar_secret = verificar_secret
 # segundos desde el ultimo mensaje y respondemos al hilo completo de una vez.
 DEBOUNCE_SEGUNDOS = float(os.getenv("DEBOUNCE_MENSAJES_SEGUNDOS", "8"))
 
-# telefono -> {"textos": [str], "mensaje_id": str, "task": asyncio.Task}
+# telefono -> {"textos": [str], "mensaje_id": str, "tiene_audio": bool, "task": asyncio.Task}
 _buffers_debounce: dict[str, dict] = {}
 
 
-def encolar_con_debounce(telefono: str, texto: str, mensaje_id: str):
+def encolar_con_debounce(telefono: str, texto: str, mensaje_id: str,
+                         es_audio: bool = False):
     """Acumula mensajes del mismo telefono y dispara el procesamiento
-    cuando pasan DEBOUNCE_SEGUNDOS sin mensajes nuevos."""
+    cuando pasan DEBOUNCE_SEGUNDOS sin mensajes nuevos.
+    Si alguno de los mensajes fue nota de voz, la respuesta espeja el canal (audio)."""
     buf = _buffers_debounce.get(telefono)
     if buf:
         buf["textos"].append(texto)
         buf["mensaje_id"] = mensaje_id
+        buf["tiene_audio"] = buf.get("tiene_audio", False) or es_audio
         buf["task"].cancel()
         logger.info(
             f"Debounce: mensaje acumulado para {enmascarar_telefono(telefono)} "
             f"({len(buf['textos'])} en buffer)"
         )
     else:
-        buf = {"textos": [texto], "mensaje_id": mensaje_id}
+        buf = {"textos": [texto], "mensaje_id": mensaje_id, "tiene_audio": es_audio}
         _buffers_debounce[telefono] = buf
     buf["task"] = asyncio.create_task(_disparar_debounce(telefono))
 
@@ -107,7 +115,10 @@ async def _disparar_debounce(telefono: str):
     if not buf:
         return
     texto = "\n".join(buf["textos"])
-    await procesar_mensaje(telefono, texto, buf["mensaje_id"])
+    await procesar_mensaje(
+        telefono, texto, buf["mensaje_id"],
+        responder_audio=buf.get("tiene_audio", False)
+    )
 
 
 @asynccontextmanager
@@ -201,7 +212,43 @@ async def _enviar_humano(telefono: str, fragmentos: list[str], mensaje_id: str):
         await proveedor.enviar_mensaje(telefono, fragmento)
 
 
-async def procesar_mensaje(telefono: str, texto: str, mensaje_id: str):
+async def _enviar_respuesta_audio(telefono: str, respuesta: str, mensaje_id: str) -> bool:
+    """Genera TTS y envia la respuesta como nota de voz. Retorna False si algo
+    falla para que el caller haga fallback a texto (nunca dejar sin respuesta)."""
+    if not voice_tts.tts_configurado():
+        logger.warning("TTS no configurado, fallback a texto")
+        return False
+    if not voice_media.url_base_publica():
+        logger.warning("Sin URL publica (WEBHOOK_BASE_URL), no se puede enviar audio")
+        return False
+
+    idioma = detectar_idioma_simple(respuesta)
+    audio = await voice_tts.generar_audio(respuesta, idioma)
+    if not audio:
+        return False
+
+    extension = "ogg" if "opus" in voice_tts.ELEVENLABS_OUTPUT_FORMAT else "mp3"
+    nombre = voice_media.guardar_audio_temporal(audio, extension)
+    url_audio = voice_media.url_publica_media(nombre)
+
+    # Delay humano: escuchar el audio del cliente + grabar la respuesta lleva tiempo
+    delay = calcular_delay_audio(respuesta)
+    logger.info(f"Nota de voz a {enmascarar_telefono(telefono)} en {delay:.1f}s ({len(audio)} bytes)")
+    await proveedor.enviar_typing_indicator(mensaje_id)
+    await asyncio.sleep(delay)
+
+    ok = await proveedor.enviar_audio(telefono, url_audio)
+    if ok:
+        await analytics.registrar_evento(
+            "nota_voz_outbound", telefono,
+            {"chars": len(respuesta), "costo_tts": voice_tts.estimar_costo_tts(respuesta)},
+            client_id=CLIENT_ID
+        )
+    return ok
+
+
+async def procesar_mensaje(telefono: str, texto: str, mensaje_id: str,
+                           responder_audio: bool = False):
     """Procesa un mensaje con backpressure via semaforo."""
     if _semaforo._value == 0:
         logger.warning(f"Semaforo lleno ({MAX_CONCURRENT}), esperando para {enmascarar_telefono(telefono)}")
@@ -215,9 +262,24 @@ async def procesar_mensaje(telefono: str, texto: str, mensaje_id: str):
             # (historial se leyo antes, asi que no se duplica en el prompt)
             await guardar_mensaje(telefono, "user", texto)
 
-            respuesta = await generar_respuesta(texto, historial, lead_negocio, telefono)
+            respuesta = await generar_respuesta(
+                texto, historial, lead_negocio, telefono,
+                canal="voz" if responder_audio else "texto"
+            )
 
             await guardar_mensaje(telefono, "assistant", respuesta)
+
+            # Espejar el canal: si mando nota de voz, responder con nota de voz.
+            # Si el TTS falla por lo que sea, cae al flujo de texto normal.
+            if responder_audio:
+                if await _enviar_respuesta_audio(telefono, respuesta, mensaje_id):
+                    logger.info(f"Respuesta en audio a {enmascarar_telefono(telefono)} ({len(respuesta)} chars)")
+                    if lead_negocio:
+                        await seguimiento.programar_followup_lead(
+                            telefono, {"negocio": lead_negocio}, horas=FOLLOWUP_LEAD_HORAS
+                        )
+                    return
+                logger.warning(f"TTS fallo para {enmascarar_telefono(telefono)}, enviando texto")
 
             fragmentos = partir_respuesta(respuesta)
             if not fragmentos:
@@ -267,14 +329,19 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
         mensajes = await proveedor.parsear_webhook(request)
 
         for msg in mensajes:
-            if msg.es_propio or not msg.texto:
+            if msg.es_propio or (not msg.texto and not msg.es_audio):
                 continue
 
-            logger.info(f"Mensaje de {enmascarar_telefono(msg.telefono)} ({len(msg.texto)} chars)")
+            if msg.es_audio:
+                logger.info(f"Nota de voz de {enmascarar_telefono(msg.telefono)}")
+            else:
+                logger.info(f"Mensaje de {enmascarar_telefono(msg.telefono)} ({len(msg.texto)} chars)")
 
             # Sanitizar mensaje entrante (longitud, caracteres de control)
-            msg.texto = sanitizar_mensaje_entrante(msg.texto)
-            if not msg.texto:
+            # (las notas de voz se sanitizan despues de transcribir)
+            if msg.texto:
+                msg.texto = sanitizar_mensaje_entrante(msg.texto)
+            if not msg.texto and not msg.es_audio:
                 continue
 
             # Deduplicacion atomica: el INSERT OR IGNORE es el gate
@@ -358,7 +425,7 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
                 idioma = detectar_idioma_simple(msg.texto)
                 respuesta_fuera = mensaje_fuera_horario(idioma)
                 await proveedor.enviar_mensaje(msg.telefono, respuesta_fuera)
-                await guardar_mensaje(msg.telefono, "user", msg.texto)
+                await guardar_mensaje(msg.telefono, "user", msg.texto or "[nota de voz]")
                 await guardar_mensaje(msg.telefono, "assistant", respuesta_fuera)
                 await analytics.registrar_evento(
                     analytics.EVENTO_FUERA_HORARIO, msg.telefono, {"idioma": idioma},
@@ -368,6 +435,12 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
                 background_tasks.add_task(
                     _maybe_programar_followup, msg.telefono
                 )
+                continue
+
+            # Notas de voz: descargar + transcribir en background y recien ahi
+            # encolar (el webhook responde 200 rapido, la transcripcion tarda ~2s)
+            if msg.es_audio:
+                asyncio.create_task(_procesar_nota_voz(msg))
                 continue
 
             # Encolar con debounce: si llegan varios mensajes seguidos del mismo
@@ -397,6 +470,156 @@ async def _maybe_programar_followup(telefono: str):
         logger.info(f"Follow-up programado para {enmascarar_telefono(telefono)} en {FOLLOWUP_LEAD_HORAS}h")
     except Exception as e:
         logger.warning(f"No se pudo programar follow-up para {enmascarar_telefono(telefono)}: {e}")
+
+
+async def _idioma_de_conversacion(telefono: str) -> str:
+    """Detecta el idioma a partir del ultimo mensaje del usuario en el historial."""
+    try:
+        historial = await obtener_historial(telefono, limite=6)
+        for msg in reversed(historial):
+            if msg.get("role") == "user" and msg.get("content"):
+                return detectar_idioma_simple(msg["content"])
+    except Exception:
+        pass
+    return "he"
+
+
+# Mensaje humanizado cuando la transcripcion falla o viene vacia
+_NO_TE_ESCUCHE = {
+    "es": "Uy, no se escucho bien el audio, me lo mandas de nuevo?",
+    "en": "Hey, the audio didn't come through well, can you send it again?",
+    "he": "אופס, האודיו לא נשמע טוב, אפשר לשלוח שוב?",
+    "ru": "Ой, аудио плохо слышно, можешь отправить ещё раз?",
+    "ar": "معلش، الصوت ما وصل منيح، فيك تبعتو مرة تانية؟",
+}
+
+
+async def _procesar_nota_voz(msg):
+    """Descarga + transcribe una nota de voz y la mete al pipeline normal.
+    Corre como task aparte para que el webhook responda 200 rapido."""
+    try:
+        if not voice_transcribe.stt_configurado():
+            logger.warning("STT no configurado (OPENAI_API_KEY), nota de voz ignorada")
+            idioma = await _idioma_de_conversacion(msg.telefono)
+            await proveedor.enviar_mensaje(
+                msg.telefono, _NO_TE_ESCUCHE.get(idioma, _NO_TE_ESCUCHE["es"])
+            )
+            return
+
+        descarga = await voice_media.descargar_media_twilio(msg.media_url)
+        texto = None
+        if descarga:
+            audio_bytes, content_type = descarga
+            texto = await voice_transcribe.transcribir(audio_bytes, content_type)
+            await analytics.registrar_evento(
+                "nota_voz_inbound", msg.telefono,
+                {
+                    "bytes": len(audio_bytes),
+                    "transcrito": bool(texto),
+                    "costo_stt": voice_transcribe.estimar_costo_stt(len(audio_bytes)),
+                },
+                client_id=CLIENT_ID
+            )
+
+        if not texto:
+            idioma = await _idioma_de_conversacion(msg.telefono)
+            await proveedor.enviar_mensaje(
+                msg.telefono, _NO_TE_ESCUCHE.get(idioma, _NO_TE_ESCUCHE["es"])
+            )
+            return
+
+        texto = sanitizar_mensaje_entrante(texto)
+        if not texto:
+            return
+
+        logger.info(f"Nota de voz transcrita de {enmascarar_telefono(msg.telefono)} ({len(texto)} chars)")
+
+        # Deteccion de urgencia sobre el texto transcrito (igual que el flujo de texto)
+        if ESCALACION_ACTIVA:
+            es_urgente, razones = detectar_urgencia(texto)
+            if es_urgente:
+                await analytics.registrar_evento(
+                    analytics.EVENTO_ESCALACION, msg.telefono,
+                    {"razones": razones, "origen": "nota_voz"}, client_id=CLIENT_ID
+                )
+                asyncio.create_task(escalar(msg.telefono, texto, razones, 30))
+                idioma = detectar_idioma_simple(texto)
+                avisos = {
+                    "es": "Recibido, te paso con una persona del equipo ahora",
+                    "en": "Got it, let me get someone from the team for you now",
+                    "he": "קיבלתי, אני מעביר אותך למישהו מהצוות עכשיו",
+                    "ru": "Принято, сейчас передам вас человеку из команды",
+                    "ar": "وصلني، رح وصلك مع حدا من الفريق هلق",
+                }
+                await proveedor.enviar_mensaje(msg.telefono, avisos.get(idioma, avisos["es"]))
+                return
+
+        # Al pipeline normal, marcando que el canal es audio (espeja la respuesta)
+        encolar_con_debounce(msg.telefono, texto, msg.mensaje_id, es_audio=True)
+
+    except Exception as e:
+        logger.error(f"Error procesando nota de voz de {enmascarar_telefono(msg.telefono)}: {e}")
+
+
+@app.post("/voice")
+async def voice_webhook(request: Request):
+    """Webhook de Twilio Voice para llamadas WhatsApp (entrantes y salientes).
+    Devuelve TwiML <Connect><ConversationRelay> que abre el WebSocket /ws/voice."""
+    from agent.voice import relay
+
+    form = await request.form()
+    form_dict = {k: str(v) for k, v in form.items()}
+
+    # Validar firma Twilio (mismo mecanismo que el webhook de mensajes)
+    if hasattr(proveedor, "validar_firma") and not proveedor.validar_firma(request, form_dict):
+        logger.warning("Firma Twilio invalida en /voice, rechazando")
+        raise HTTPException(status_code=403, detail="Firma invalida")
+
+    # En salientes (iniciadas por nosotros) el cliente esta en "To"
+    direccion = form_dict.get("Direction", "inbound")
+    campo = "To" if direccion.startswith("outbound") else "From"
+    telefono = form_dict.get(campo, "").replace("whatsapp:", "")
+
+    # IA pausada o llamadas desactivadas o cap de costos: rechazar (suena ocupado,
+    # el cliente escribe por chat y lo atiende Liam)
+    if not LLAMADAS_ACTIVAS or await esta_pausado():
+        logger.info(f"Llamada rechazada (pausa/desactivado) de {enmascarar_telefono(telefono)}")
+        return Response(content=relay.twiml_rechazar("busy"), media_type="text/xml")
+    costo_hoy = await obtener_costo_diario(client_id=CLIENT_ID)
+    if costo_hoy >= COSTO_DIARIO_MAXIMO:
+        logger.warning(f"Llamada rechazada por cap de costos (${costo_hoy:.4f})")
+        return Response(content=relay.twiml_rechazar("busy"), media_type="text/xml")
+
+    base = voice_media.url_base_publica()
+    if not base:
+        logger.error("WEBHOOK_BASE_URL no configurada, no se puede atender llamadas")
+        return Response(content=relay.twiml_rechazar("busy"), media_type="text/xml")
+
+    idioma = await _idioma_de_conversacion(telefono)
+    twiml = relay.twiml_llamada(telefono, idioma, base)
+    logger.info(f"Llamada {direccion} de {enmascarar_telefono(telefono)} (idioma={idioma})")
+    await analytics.registrar_evento(
+        "llamada_voz_inicio", telefono, {"direccion": direccion}, client_id=CLIENT_ID
+    )
+    return Response(content=twiml, media_type="text/xml")
+
+
+@app.websocket("/ws/voice")
+async def websocket_voz(websocket: WebSocket):
+    """WebSocket de ConversationRelay: texto del cliente entra, tokens de Claude salen."""
+    from agent.voice import relay
+    await relay.manejar_websocket_voz(websocket)
+
+
+@app.get("/media/{nombre}")
+async def servir_media(nombre: str):
+    """Sirve los audios generados (Twilio los descarga de aca). Nombres random
+    de 24+ bytes, sin auth — la URL es efimera y se borra a las 24h."""
+    ruta = voice_media.ruta_media(nombre)
+    if not ruta:
+        raise HTTPException(status_code=404, detail="No encontrado")
+    media_type = "audio/ogg" if nombre.endswith(".ogg") else "audio/mpeg"
+    return FileResponse(ruta, media_type=media_type)
 
 
 # --- Modelos para endpoints internos ---
@@ -623,6 +846,7 @@ async def disparar_limpieza(request: Request):
     _verificar_secret(request)
     await limpiar_registros_antiguos()
     await analytics.limpiar_eventos_antiguos(dias=180)
+    voice_media.limpiar_media_antigua()
     return {"status": "ok"}
 
 

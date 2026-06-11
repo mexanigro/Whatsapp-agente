@@ -43,13 +43,19 @@ whatsapp-agentkit-main/
     memory.py        -- SQLite async, historial por telefono + leads
     tools.py         -- Herramientas del negocio (horario, knowledge search, lead scoring)
     pausa.py         -- Sistema de pausa admin (Liam toma control via WhatsApp)
+    voice/
+      transcribe.py  -- STT notas de voz (OpenAI gpt-4o-mini-transcribe)
+      tts.py         -- TTS ElevenLabs Flash v2.5 (OGG/Opus = nota de voz nativa)
+      media.py       -- Descarga media Twilio + storage temporal /media (TTL 24h)
+      relay.py       -- Llamadas en vivo: TwiML + WebSocket ConversationRelay
     providers/
       __init__.py    -- Factory: obtener_proveedor() segun WHATSAPP_PROVIDER env
       base.py        -- Clase abstracta ProveedorWhatsApp + MensajeEntrante dataclass
-      twilio.py      -- Adaptador Twilio
+      twilio.py      -- Adaptador Twilio (texto + media + validar_firma)
   config/
     business.yaml    -- Datos del negocio (nombre, descripcion, horario, precio)
     prompts.yaml     -- System prompt del agente (personalidad, reglas, contexto)
+    prompts_voice.yaml -- System prompt del canal de voz (llamadas) + saludos/fillers
   knowledge/         -- Archivos de conocimiento del negocio (PDFs, TXTs)
   tests/
     test_local.py    -- Chat interactivo en terminal (simula WhatsApp)
@@ -88,8 +94,16 @@ Liam (admin, numero hardcoded en NUMERO_ADMIN) puede controlar el agente via Wha
 | `#estado` | Muestra si IA esta activa/pausada y tiempo restante |
 | `#lead +972XXXXXXXXX Nombre Negocio` | Registra un lead con telefono y negocio |
 | `#leads` | Lista todos los leads registrados |
+| `#llamar +972XXXXXXXXX` | Llamada de voz saliente por WhatsApp (la atiende la IA) |
 
-Cuando la IA esta pausada, los mensajes entrantes se ignoran silenciosamente (Liam responde manualmente).
+Cuando la IA esta pausada, los mensajes entrantes se ignoran silenciosamente (Liam responde manualmente) y las llamadas de voz se rechazan (suena ocupado).
+
+## Voz (agent/voice/)
+
+Dos features (docs: VOICE-IMPLEMENTATION.md = arquitectura/costos, VOICE-HUMANIZATION.md = estudio de humanizacion):
+
+* **Notas de voz**: audio entrante -> descarga (media.py) -> STT OpenAI (transcribe.py) -> pipeline normal de Claude con `canal="voz"` (respuesta hablada, sin `|||`) -> TTS ElevenLabs (tts.py) -> OGG/Opus servido en `GET /media/{id}.ogg` -> Twilio lo manda como nota de voz. Si STT/TTS fallan, fallback a texto.
+* **Llamadas en vivo**: WhatsApp Business Calling -> `POST /voice` (TwiML ConversationRelay con voz ElevenLabs codificada `VoiceID-modelo-speed_stability_similarity`) -> WebSocket `/ws/voice` (relay.py) -> Claude Haiku streaming token a token con historial compartido de memory.py. Al cortar guarda resumen de la llamada en el historial. Requiere onboarding de ConversationRelay en Twilio Console + ElevenLabs habilitado en la cuenta.
 
 ## Sistema de leads (agent/memory.py)
 

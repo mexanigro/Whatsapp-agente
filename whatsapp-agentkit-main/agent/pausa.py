@@ -42,12 +42,18 @@ async def _guardar_pausa(hasta: datetime | None):
     await guardar_config("pausa_hasta", hasta.isoformat() if hasta else None)
 
 
+def normalizar_telefono(telefono: str) -> str:
+    """Normaliza un telefono removiendo espacios, guiones y el prefijo whatsapp:."""
+    limpio = telefono.replace(" ", "").replace("-", "")
+    if limpio.startswith("whatsapp:"):
+        limpio = limpio[len("whatsapp:"):]
+    return limpio
+
+
 def es_admin(telefono: str) -> bool:
     if not NUMERO_ADMIN:
         return False
-    limpio = telefono.replace(" ", "").replace("-", "")
-    admin_limpio = NUMERO_ADMIN.replace(" ", "").replace("-", "")
-    return limpio == admin_limpio or limpio.endswith(admin_limpio[-10:])
+    return normalizar_telefono(telefono) == normalizar_telefono(NUMERO_ADMIN)
 
 
 def parsear_comando(texto: str) -> bool:
@@ -61,8 +67,10 @@ async def ejecutar_comando(texto: str) -> str | None:
 
     if texto_lower == "#recargar":
         from agent.brain import recargar_config
+        from agent.voice.relay import recargar_config_voz
         resultado = await _sincronizar_config_remota()
         recargar_config()
+        recargar_config_voz()
         if resultado:
             return f"Config sincronizada desde servidor y recargada. {resultado}"
         return "Config local recargada. El system prompt se actualizo."
@@ -122,6 +130,19 @@ async def ejecutar_comando(texto: str) -> str | None:
         lineas = [f"{f[1]} -> {f[0]} ({f[2][:16]})" for f in filas]
         return "Seguimientos pendientes:\n" + "\n".join(lineas)
 
+    # #llamar +972XXXXXXXXX — llamada de voz saliente por WhatsApp (la atiende la IA)
+    match = re.match(r"^#llamar\s+(\+?\d[\d\s-]{7,})\s*$", texto.strip(), re.IGNORECASE)
+    if match:
+        telefono = re.sub(r"[\s-]", "", match.group(1))
+        from agent.voice.relay import iniciar_llamada_saliente
+        ok = await iniciar_llamada_saliente(telefono)
+        if ok:
+            return (
+                f"Llamando a {telefono} por WhatsApp. "
+                "Ojo: el cliente tiene que haber dado permiso de llamadas antes."
+            )
+        return "No se pudo iniciar la llamada. Revisa logs y WEBHOOK_BASE_URL."
+
     # #lead +972XXXXXXXXX Nombre del Negocio
     match = re.match(r"^#lead\s+(\+?\d[\d\s-]{7,})\s+(.+)$", texto.strip(), re.IGNORECASE)
     if match:
@@ -135,7 +156,7 @@ async def ejecutar_comando(texto: str) -> str | None:
         leads = await listar_leads()
         if not leads:
             return "No hay leads registrados."
-        lineas = [f"{l['negocio']} ({l['telefono']})" for l in leads]
+        lineas = [f"{l['negocio']} ({enmascarar_telefono(l['telefono'])})" for l in leads]
         return "Leads registrados:\n" + "\n".join(lineas)
 
     match = re.match(r"^#pausa\s+(\d+)\s*h$", texto_lower)

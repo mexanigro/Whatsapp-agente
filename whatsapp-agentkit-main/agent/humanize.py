@@ -20,6 +20,15 @@ def partir_respuesta(respuesta: str) -> list[str]:
     return [p for p in partes if p]
 
 
+def calcular_delay_audio(texto: str) -> float:
+    """Delay humano antes de mandar una nota de voz: escuchar el audio del otro,
+    pensar y grabar. La grabacion dura aprox lo que tarda en decirse el texto
+    (~14 chars/seg hablando) mas unos segundos de arranque."""
+    grabacion = len(texto) / random.uniform(12.0, 16.0)
+    base = random.uniform(3.0, 7.0)
+    return max(DELAY_MIN, min(35.0, base + grabacion))
+
+
 def calcular_delay(texto: str, es_primer_fragmento: bool = True) -> float:
     """Calcula delay humano variable antes de enviar un fragmento.
 
