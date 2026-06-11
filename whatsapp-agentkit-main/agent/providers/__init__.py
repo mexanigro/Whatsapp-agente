@@ -12,8 +12,11 @@ def obtener_proveedor() -> ProveedorWhatsApp:
         raise ValueError("WHATSAPP_PROVIDER no configurado en .env. Usa: meta o twilio")
 
     if proveedor == "meta":
-        from agent.providers.meta import ProveedorMeta
-        return ProveedorMeta()
+        raise NotImplementedError(
+            "WHATSAPP_PROVIDER=meta no esta implementado. "
+            "Usa WHATSAPP_PROVIDER=twilio. "
+            "Soporte para Meta Cloud API sera agregado en una version futura."
+        )
     elif proveedor == "twilio":
         from agent.providers.twilio import ProveedorTwilio
         return ProveedorTwilio()

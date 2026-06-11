@@ -27,6 +27,10 @@ _slot_locks: dict[str, asyncio.Lock] = {}
 
 
 def _obtener_slot_lock(key: str) -> asyncio.Lock:
+    # Eviction simple para que el dict no crezca sin limite
+    if len(_slot_locks) > 1000:
+        for k in [k for k, lk in _slot_locks.items() if not lk.locked()]:
+            del _slot_locks[k]
     if key not in _slot_locks:
         _slot_locks[key] = asyncio.Lock()
     return _slot_locks[key]
@@ -112,8 +116,9 @@ async def _notificar_booking_increment(client_id: str):
                 json={"clientId": client_id, "source": "whatsapp"},
                 headers=_HEADERS,
             )
-    except Exception:
-        logger.debug(f"No se pudo incrementar booking counter para {client_id}")
+    except Exception as e:
+        # Afecta facturacion por tiers: dejar rastro del error real
+        logger.warning(f"No se pudo incrementar booking counter para {client_id}: {e}")
 
 
 _CONFLICTO_KEYWORDS = [

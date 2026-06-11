@@ -16,6 +16,7 @@ logger = logging.getLogger("agentkit")
 
 LIMITE_POR_MINUTO = 5
 LIMITE_POR_HORA = 30
+LIMITE_GLOBAL_POR_MINUTO = int(os.getenv("RATE_LIMIT_GLOBAL_POR_MINUTO", "200"))
 
 # Backend de rate limiting (Redis o in-memory)
 _redis_client = None
@@ -41,6 +42,9 @@ def inicializar_rate_limit():
 
 # In-memory fallback: {telefono: [timestamps]}
 _registros: dict[str, list[float]] = defaultdict(list)
+
+# Global rate limit tracker (all phones combined)
+_registros_global: list[float] = []
 
 
 def verificar_rate_limit(telefono: str) -> bool:
@@ -109,3 +113,42 @@ def _verificar_redis(telefono: str) -> bool:
     except Exception as e:
         logger.error(f"Error Redis rate limit, fallback a in-memory: {e}")
         return _verificar_inmemory(telefono)
+
+
+def verificar_rate_limit_global() -> bool:
+    """Rate limiting global (todos los telefonos combinados). Previene abuse masivo."""
+    if _usando_redis:
+        return _verificar_global_redis()
+    return _verificar_global_inmemory()
+
+
+def _verificar_global_inmemory() -> bool:
+    global _registros_global
+    ahora = time.time()
+    _registros_global = [t for t in _registros_global if ahora - t < 60]
+    if len(_registros_global) >= LIMITE_GLOBAL_POR_MINUTO:
+        logger.warning(f"Rate limit GLOBAL excedido: {len(_registros_global)}/{LIMITE_GLOBAL_POR_MINUTO} req/min")
+        return False
+    _registros_global.append(ahora)
+    return True
+
+
+def _verificar_global_redis() -> bool:
+    try:
+        ahora = time.time()
+        key = "rl:global:min"
+        pipe = _redis_client.pipeline()
+        pipe.zremrangebyscore(key, 0, ahora - 60)
+        pipe.zcard(key)
+        _, count = pipe.execute()
+        if count >= LIMITE_GLOBAL_POR_MINUTO:
+            logger.warning(f"Rate limit GLOBAL excedido (Redis): {count}/{LIMITE_GLOBAL_POR_MINUTO} req/min")
+            return False
+        pipe = _redis_client.pipeline()
+        pipe.zadd(key, {str(ahora): ahora})
+        pipe.expire(key, 60)
+        pipe.execute()
+        return True
+    except Exception as e:
+        logger.error(f"Error Redis global rate limit, fallback a in-memory: {e}")
+        return _verificar_global_inmemory()

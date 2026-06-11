@@ -1,3 +1,7 @@
+<!-- NOTA: Este archivo contiene datos internos del negocio de forma intencional.
+     El agente IA necesita esta informacion para responder con contexto a los clientes.
+     No es informacion secreta — es la misma que aparece en la web publica. -->
+
 # Arzac Studio — Información del Negocio
 
 ## Qué es Arzac Studio

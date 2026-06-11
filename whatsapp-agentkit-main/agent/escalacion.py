@@ -125,6 +125,7 @@ async def escalar(telefono: str, texto_original: str, razones: list[str],
     razones_str = ", ".join(razones)
     extracto = texto_original[:200].replace("\n", " ")
 
+    # Telefono completo intencional: admin necesita el numero para contactar al cliente
     mensaje = (
         f"ESCALACION URGENTE\n"
         f"De: {telefono}{contexto_lead}\n"
