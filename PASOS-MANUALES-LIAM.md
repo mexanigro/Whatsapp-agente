@@ -18,6 +18,7 @@ En Railway → proyecto agentkit → Variables, agregar:
 - [ ] `ELEVENLABS_API_KEY` — crear en elevenlabs.io → Profile → API Keys
 - [ ] `ELEVENLABS_VOICE_ID` — elegir UNA voz en elevenlabs.io → Voices (calida, energia media; va a ser "la voz del negocio" en los 5 idiomas). Copiar el Voice ID (no el nombre).
 - [ ] `WEBHOOK_BASE_URL` — la URL publica de la app, ej `https://tu-app.up.railway.app` (sin barra final). Sin esto no se pueden servir los audios de respuesta ni atender llamadas.
+- [ ] `AGENT_API_SECRET` — si todavia no esta cargada en Railway: **obligatoria**. Sin ella el WebSocket de llamadas se rechaza (la auth del WS se deriva de este secret) y los endpoints internos (`/notify`, `/tasks/*`) devuelven 503. Generar con: `python -c "import secrets; print(secrets.token_urlsafe(32))"` (tiene que ser el MISMO valor que en nichos-hub).
 
 ### 3. Twilio — Webhook de voz del sender WhatsApp (necesario solo para LLAMADAS)
 

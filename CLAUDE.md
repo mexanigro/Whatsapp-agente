@@ -121,7 +121,7 @@ El estudio completo (tecnicas verificadas de Vapi/Retell/ElevenLabs/Twilio) esta
 | `#volver` | Reactiva la IA |
 | `#estado` | Estado de pausa |
 | `#costo` | Costos API hoy/semana |
-| `#stats` | Metricas de conversion 30d |
+| `#stats` / `#metricas` | Metricas de conversion 30d |
 | `#seguimientos` | Follow-ups pendientes |
 | `#lead +972... Nombre` | Registra lead |
 | `#leads` | Lista leads |
@@ -138,6 +138,7 @@ ANTHROPIC_API_KEY, CLAUDE_MODEL=claude-sonnet-4-6
 WHATSAPP_PROVIDER=twilio
 TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER
 WEBHOOK_BASE_URL          # URL publica (firma Twilio + servir audios + WS de voz)
+                          # fallbacks en media.py: PUBLIC_BASE_URL, RAILWAY_PUBLIC_DOMAIN
 PORT=8000, ENVIRONMENT=production, DB_PATH=agentkit.db
 
 # Negocio
@@ -147,7 +148,9 @@ AUTO_REPLY_FUERA_HORARIO, ESCALACION_ACTIVA, FOLLOWUP_LEAD_HORAS
 MAX_CONCURRENT_RESPONSES, MAX_MESSAGE_LENGTH, DEBOUNCE_MENSAJES_SEGUNDOS=8
 
 # Integracion nichos-hub
-NICHOS_HUB_URL, AGENT_API_SECRET, CLIENT_ID
+NICHOS_HUB_URL, CLIENT_ID
+AGENT_API_SECRET          # OBLIGATORIO en prod: sin el, /notify, /status y /tasks/*
+                          # devuelven 503 y el WebSocket de llamadas se rechaza
 
 # Templates Twilio Content API (opcionales)
 TWILIO_TEMPLATE_APPT_*, TWILIO_TEMPLATE_NEW_LEAD, TWILIO_TEMPLATE_LEAD_FOLLOWUP
@@ -157,6 +160,7 @@ OPENAI_API_KEY            # STT (gpt-4o-mini-transcribe)
 ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID   # TTS (obligatorios para responder audio)
 ELEVENLABS_VOICE_ID_{ES,EN,HE,RU,AR}      # overrides por idioma (opcional)
 ELEVENLABS_STABILITY=0.4, ELEVENLABS_SIMILARITY=0.8, ELEVENLABS_STYLE=0.2, ELEVENLABS_SPEED=1.0
+OPENAI_STT_MODEL, ELEVENLABS_MODEL, ELEVENLABS_OUTPUT_FORMAT  # overrides opcionales
 MEDIA_DIR=media_temp, MEDIA_TTL_HORAS=24
 
 # Voz — llamadas
