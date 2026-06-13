@@ -1,5 +1,10 @@
 # Secretos — NUNCA subir
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+serviceAccountKey.json
 
 # Base de datos local
 *.db
@@ -9,8 +14,12 @@
 # Python
 __pycache__/
 *.py[cod]
+.pytest_cache/
 .venv/
 venv/
+
+# Media temporal (audios TTS)
+media_temp/
 
 # Knowledge (archivos privados del negocio)
 # knowledge/*

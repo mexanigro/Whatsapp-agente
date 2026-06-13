@@ -5,7 +5,7 @@ import json
 import logging
 import base64
 import httpx
-from fastapi import Request
+from fastapi import Request, HTTPException
 from twilio.request_validator import RequestValidator
 from agent.providers.base import ProveedorWhatsApp, MensajeEntrante
 from agent.security import enmascarar_telefono
@@ -55,8 +55,8 @@ class ProveedorTwilio(ProveedorWhatsApp):
                 logger.warning(f"Firma Twilio invalida, rechazando webhook (url={url})")
                 return []
         else:
-            logger.error("SEGURIDAD: TWILIO_AUTH_TOKEN no configurado, no se puede validar firma — rechazando webhook")
-            return []
+            logger.error("SEGURIDAD: TWILIO_AUTH_TOKEN no configurado — rechazando webhook con 403")
+            raise HTTPException(status_code=403, detail="TWILIO_AUTH_TOKEN no configurado; webhook rechazado")
 
         texto = form.get("Body", "")
         telefono = form.get("From", "").replace("whatsapp:", "")

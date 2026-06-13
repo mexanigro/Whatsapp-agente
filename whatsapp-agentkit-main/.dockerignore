@@ -1,0 +1,47 @@
+# Secretos — NUNCA en la imagen Docker
+.env
+.env.*
+
+# Git metadata
+.git
+.gitignore
+
+# Certificados y llaves privadas
+*.pem
+*.key
+serviceAccountKey.json
+
+# Python cache (se regenera en el build)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Virtualenvs locales
+.venv/
+venv/
+
+# Tests (no se ejecutan en la imagen de produccion)
+tests/
+
+# Documentacion (no es codigo de produccion)
+*.md
+docs/
+
+# Media temporal (se genera en runtime, no debe estar en la imagen)
+media_temp/
+
+# Bases de datos locales
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE y OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/

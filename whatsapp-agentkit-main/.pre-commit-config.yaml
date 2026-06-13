@@ -1,0 +1,44 @@
+# .pre-commit-config.yaml — Hooks de seguridad para prevenir leaks de secretos.
+#
+# Instalacion:
+#   pip install pre-commit
+#   pre-commit install
+#
+# Uso manual (escanear todos los archivos):
+#   pre-commit run --all-files
+#
+# Alternativa sin instalar pre-commit:
+#   bash scripts/check-secrets.sh
+
+repos:
+  # Script propio: bloquea .env, credenciales y patrones de API keys
+  - repo: local
+    hooks:
+      - id: check-secrets
+        name: Escanear secretos y credenciales
+        entry: bash scripts/check-secrets.sh
+        language: system
+        stages: [commit]
+        always_run: true
+
+  # detect-secrets: deteccion de secretos con heuristica avanzada
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.4.0
+    hooks:
+      - id: detect-secrets
+        name: detect-secrets
+        args: ["--baseline", ".secrets.baseline"]
+        exclude: ".env.example|tests/"
+
+  # Verifica que no se commiten archivos .env accidentalmente
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+      - id: detect-private-key
+      - id: check-merge-conflict
+      - id: trailing-whitespace
+        types: [python]
+      - id: end-of-file-fixer
+        types: [python]

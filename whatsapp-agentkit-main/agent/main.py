@@ -26,6 +26,7 @@ from agent.security import (
     verificar_secret, enmascarar_telefono, sanitizar_para_log,
     sanitizar_mensaje_entrante, verificar_timestamp_webhook, error_seguro,
 )
+from agent.env_validator import validar_entorno
 from agent import analytics
 from agent import notifications
 from agent import seguimiento
@@ -123,6 +124,7 @@ async def _disparar_debounce(telefono: str):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    validar_entorno()  # Falla rapido si faltan variables criticas antes de aceptar trafico
     await inicializar_db()
     inicializar_rate_limit()
     asyncio.create_task(limpiar_registros_antiguos())

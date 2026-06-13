@@ -1,7 +1,11 @@
 # Secretos — NUNCA subir
 .env
+.env.*
 *.env
 !.env.example
+*.pem
+*.key
+serviceAccountKey.json
 
 # Bases de datos locales
 *.db
@@ -11,8 +15,14 @@
 # Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.pytest_cache/
 .venv/
 venv/
+
+# Media temporal (audios TTS)
+media_temp/
 
 # OS
 .DS_Store
